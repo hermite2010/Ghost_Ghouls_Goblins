@@ -9,6 +9,10 @@ library(discrim)
 library(naivebayes)# FOR NAIVE BAYES
 library(kknn)
 library(themis)    # for smote
+library(bonsai)
+library(lightgbm)
+library(parsnip)    # FOR BART
+library(dbarts)
 
 # Reading in the Data
 GGG_Train <- vroom("Ghost_Ghouls_Goblins/train.csv") #"Amazon_AEAC_Kaggle/train.csv" for local
@@ -16,7 +20,7 @@ GGG_Test <- vroom("Ghost_Ghouls_Goblins/test.csv") #"Amazon_AEAC_Kaggle/test.csv
 
 GGG_recipe <- recipe(type ~., data=GGG_Train) %>%
 #  step_mutate_at(color, fn = factor) %>% 
-  step_lencode_glm(color, outcome = vars(type)) %>%
+  step_lencode_glm(color, outcome = vars(type)) #%>%
 #  update_role(id, new_role="id")
   #step_smote(all_numeric_predictors(), neighbors = 5) #%>% 
 
@@ -226,7 +230,7 @@ nn_wf <- workflow() %>%
   add_recipe(nn_recipe) %>%
   add_model(nn_model)
 
-nn_tuneGrid <- grid_regular(hidden_units(range=c(1, 75)),
+nn_tuneGrid <- grid_regular(hidden_units(range=c(1, 10)),
                             levels=10)
 
 ## set up k-fold CV
@@ -260,3 +264,93 @@ nn_preds <- final_wf %>%
 
 ## Write it out
 vroom_write(x=nn_preds, file="Ghost_Ghouls_Goblins/NN_nnet.csv", delim=",")
+
+
+# BART --------------------------------------------------------------------
+
+bart_model <- parsnip::bart(trees=tune()) %>% # BART figures out depth and learn_rate
+  set_engine("dbarts") %>% # might need to install
+  set_mode("classification")
+
+## Set the workflow
+bart_wf <- workflow() %>%
+  add_recipe(GGG_recipe) %>%
+  add_model(bart_model)
+
+bart_tuneGrid <- grid_regular(trees(range=c(1, 100)),
+                            levels=10)
+
+## set up k-fold CV
+bart_folds <- vfold_cv(GGG_Train, v = 10, repeats=1)
+
+## Run the CV
+tuned_bart <- bart_wf %>%
+  tune_grid(resamples=bart_folds,
+            grid=bart_tuneGrid,
+            metrics=metric_set(accuracy)) #Or leave metrics NULL
+
+## find best tuning parameters
+bestTune <-tuned_bart %>%
+  select_best("accuracy")
+
+## Finalize workflow and prediction 
+final_wf <- bart_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=GGG_Train)
+
+bart_preds <- final_wf %>%
+  predict(new_data = GGG_Test, type="class") %>% 
+  mutate(id = GGG_Test$id) %>% 
+  rename(type = .pred_class) %>% 
+  select(2,1)
+
+## Write it out
+vroom_write(x=bart_preds, file="Ghost_Ghouls_Goblins/BART.csv", delim=",")
+
+
+
+
+
+# Boosting ----------------------------------------------------------------
+boost_model <- boost_tree(tree_depth=tune(),
+                          trees=tune(),
+                          learn_rate=tune()) %>%
+  set_engine("lightgbm") %>% #or "xgboost" but lightgbm is faster
+  set_mode("classification")
+
+## Set the Workflow
+boost_wf <- workflow() %>%
+  add_recipe(GGG_recipe) %>%
+  add_model(boost_model)
+
+boost_tuneGrid <- grid_regular(trees(),
+                               tree_depth(),
+                               learn_rate(),
+                               levels=5)
+
+## set up k-fold CV
+boost_folds <- vfold_cv(GGG_Train, v = 3, repeats=1)
+
+## Run the CV
+tuned_boost <- boost_wf %>%
+  tune_grid(resamples=boost_folds,
+            grid=boost_tuneGrid,
+            metrics=metric_set(accuracy)) #Or leave metrics NULL
+
+## find best tuning parameters
+bestTune <-tuned_boost %>%
+  select_best("accuracy")
+
+## Finalize workflow and prediction 
+final_wf <- boost_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=GGG_Train)
+
+boost_preds <- final_wf %>%
+  predict(new_data = GGG_Test, type="class") %>% 
+  mutate(id = GGG_Test$id) %>% 
+  rename(type = .pred_class) %>% 
+  select(2,1)
+
+## Write it out
+vroom_write(x=boost_preds, file="Ghost_Ghouls_Goblins/Boosting.csv", delim=",")
